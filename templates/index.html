@@ -1,0 +1,191 @@
+<!-- templates/index.html -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>FITS → Exoplanet Detector</title>
+  <style>
+    :root{--bg:#071427;--card:#0b1622;--accent:#7ee7c7;--muted:#9fb6c2;}
+    body{margin:0;background:linear-gradient(180deg,#02121a,#071427);color:#eaf6f1;font-family:Inter,system-ui,Arial;font-size:15px;padding:18px}
+    .container{max-width:1000px;margin:0 auto}
+    header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+    h1{margin:0;font-size:20px}
+    .card{background:var(--card);border-radius:12px;padding:14px;box-shadow:0 8px 25px rgba(0,0,0,0.5)}
+    input[type=file]{width:100%}
+    button{padding:10px 12px;border-radius:8px;border:0;background:var(--accent);color:#043;cursor:pointer}
+    .small{color:var(--muted);font-size:13px}
+    .row{display:flex;gap:12px}
+    .col{flex:1}
+    .log{background:rgba(255,255,255,0.02);padding:8px;border-radius:8px;height:120px;overflow:auto;font-family:monospace}
+    img.plot{max-width:100%;border-radius:8px;border:1px solid rgba(255,255,255,0.03);margin-top:8px}
+    label{font-size:13px;color:var(--muted)}
+    footer{margin-top:12px;color:var(--muted);font-size:13px}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>FITS → Exoplanet Detector</h1>
+        <div class="small">Upload a Kepler/TESS Target Pixel File (.fits). Server extracts light curve & runs BLS transit search.</div>
+      </div>
+      <div><a href="#" id="exampleLink" class="small" style="color:var(--accent)">Example FITS? (download separately)</a></div>
+    </header>
+
+    <div class="card">
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:260px">
+          <label>Choose FITS file (Target Pixel File)</label>
+          <input type="file" id="file" accept=".fits,.fz" />
+          <div class="small" style="margin-top:6px">Max upload size ~500 MB (server default). Typical TESS/Kepler TPFs are ~MBs.</div>
+          <div style="margin-top:8px">
+            <label class="small">Search period range (days)</label>
+            <div style="display:flex;gap:8px;margin-top:6px">
+              <input type="number" id="min_period" value="0.5" step="0.1" style="width:110px" />
+              <input type="number" id="max_period" value="50" step="0.5" style="width:110px" />
+              <button id="submitBtn">Analyze</button>
+            </div>
+          </div>
+        </div>
+
+        <div style="width:320px">
+          <label class="small">Log</label>
+          <div id="log" class="log">Ready.</div>
+        </div>
+      </div>
+
+      <hr style="opacity:0.06;margin:12px 0">
+
+      <div id="resultArea" style="display:none">
+        <div class="row" style="align-items:start;">
+          <div class="col">
+            <h3>Detection result</h3>
+            <div id="resultSummary" class="card" style="padding:12px;background:rgba(255,255,255,0.02)"></div>
+
+            <h4 style="margin-top:12px">Light curve</h4>
+            <img id="lcPlot" class="plot" src="" alt="Light curve plot" />
+
+            <h4 style="margin-top:12px">BLS Periodogram</h4>
+            <img id="blsPlot" class="plot" src="" alt="BLS periodogram" />
+
+            <h4 style="margin-top:12px">Phase-folded transit</h4>
+            <img id="phasedPlot" class="plot" src="" alt="Phased plot" />
+          </div>
+
+          <div style="width:320px">
+            <h3>Metadata</h3>
+            <div class="card" style="padding:10px;background:rgba(255,255,255,0.01)">
+              <div><strong>Points:</strong> <span id="npoints">-</span></div>
+              <div><strong>Period (days):</strong> <span id="period">-</span></div>
+              <div><strong>Transit epoch:</strong> <span id="t0">-</span></div>
+              <div><strong>Depth (relative):</strong> <span id="depth">-</span></div>
+              <div><strong>SNR (est):</strong> <span id="snr">-</span></div>
+            </div>
+
+            <h4 style="margin-top:12px">Actions</h4>
+            <div class="card" style="padding:10px;">
+              <button id="downloadJSON">Download JSON</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <footer>All processing runs on the server you host (this demo uses lightkurve & astropy). If you'd like a version that runs locally without a Python server, ask and I can craft a WebAssembly/JS-only alternative (more limited).</footer>
+  </div>
+
+<script>
+const fitsInput = document.getElementById('file');
+const submitBtn = document.getElementById('submitBtn');
+const logEl = document.getElementById('log');
+const resultArea = document.getElementById('resultArea');
+const resultSummary = document.getElementById('resultSummary');
+const lcPlot = document.getElementById('lcPlot');
+const blsPlot = document.getElementById('blsPlot');
+const phasedPlot = document.getElementById('phasedPlot');
+const npointsEl = document.getElementById('npoints');
+const periodEl = document.getElementById('period');
+const t0El = document.getElementById('t0');
+const depthEl = document.getElementById('depth');
+const snrEl = document.getElementById('snr');
+const downloadJSON = document.getElementById('downloadJSON');
+
+let lastResult = null;
+
+function log(msg){
+  logEl.innerText = msg + "\\n" + logEl.innerText;
+}
+
+submitBtn.addEventListener('click', async () => {
+  const file = fitsInput.files[0];
+  if(!file){ alert('Please choose a FITS file'); return; }
+  const minp = document.getElementById('min_period').value;
+  const maxp = document.getElementById('max_period').value;
+
+  log('Uploading file: ' + file.name);
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('min_period', minp);
+  fd.append('max_period', maxp);
+
+  resultArea.style.display = 'none';
+  resultSummary.innerHTML = '';
+  lcPlot.src = blsPlot.src = phasedPlot.src = '';
+
+  try{
+    log('Analyzing on server...');
+    const resp = await fetch('/predict_file', { method: 'POST', body: fd });
+    if(!resp.ok){
+      const txt = await resp.text();
+      log('Server error: ' + resp.status);
+      alert('Analysis failed: ' + txt);
+      return;
+    }
+    const data = await resp.json();
+    if(!data.success){
+      alert('Analysis failed: ' + data.message);
+      log('Failed: ' + data.message);
+      return;
+    }
+
+    // show result
+    lastResult = data;
+    resultArea.style.display = '';
+    npointsEl.innerText = data.n_points;
+    periodEl.innerText = data.period_days.toFixed(6);
+    t0El.innerText = (data.transit_time_bkjd || data.transit_time_bjd || data.transit_time || '-');
+    depthEl.innerText = Number(data.depth).toExponential(3);
+    snrEl.innerText = (isFinite(data.snr_estimate) ? Number(data.snr_estimate).toFixed(2) : '-');
+
+    resultSummary.innerHTML = '<pre style="white-space:pre-wrap;font-size:13px">' + JSON.stringify({
+      period_days: data.period_days,
+      transit_time: data.transit_time_bkjd,
+      depth: data.depth,
+      snr_estimate: data.snr_estimate
+    }, null, 2) + '</pre>';
+
+    if(data.plots){
+      if(data.plots.lightcurve) lcPlot.src = data.plots.lightcurve;
+      if(data.plots.periodogram) blsPlot.src = data.plots.periodogram;
+      if(data.plots.phased) phasedPlot.src = data.plots.phased;
+    }
+
+    log('Analysis complete.');
+  }catch(err){
+    log('Error: ' + err.message);
+    alert('Unexpected error: ' + err.message);
+  }
+});
+
+downloadJSON.addEventListener('click', () => {
+  if(!lastResult) return alert('No result yet');
+  const blob = new Blob([JSON.stringify(lastResult, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'fit_analysis_result.json'; a.click();
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>
